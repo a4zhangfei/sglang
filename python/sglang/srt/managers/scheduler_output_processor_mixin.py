@@ -215,6 +215,10 @@ class SchedulerOutputProcessorMixin:
             if batch.return_logprob:
                 next_token_logprobs = logits_output.next_token_logprobs.tolist()
 
+        if batch.spec_algorithm.is_lookahead():
+            batch.spec_info.post_process(batch, logits_output)
+            self.draft_worker.update_lookahead_cache(batch)
+
         self.token_to_kv_pool_allocator.free_group_begin()
 
         # Check finish condition

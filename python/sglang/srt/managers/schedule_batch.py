@@ -821,6 +821,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator = None
     tree_cache: BasePrefixCache = None
     is_hybrid: bool = False
+    eos_token_id: int|None = None
 
     # Batch configs
     model_config: ModelConfig = None
@@ -955,6 +956,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             ),
             chunked_req=chunked_req,
         )
+
+    @property
+    def eos_id(self) -> int:
+        if self.eos_token_id is None and len(self.reqs) > 0:
+            self.eos_token_id = self.reqs[0].tokenizer.eos_token_id
+        return self.eos_token_id
 
     def batch_size(self):
         return len(self.reqs)
@@ -1540,7 +1547,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.forward_mode = ForwardMode.DECODE
         bs = len(self.reqs)
 
-        if self.spec_algorithm.is_eagle():
+        if self.spec_algorithm.is_eagle() or self.spec_algorithm.is_lookahead():
             # if spec decoding is used, the decode batch is prepared inside
             # `forward_batch_speculative_generation` after running draft models.
             return
@@ -1737,6 +1744,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             forward_mode=self.forward_mode,
             input_ids=self.input_ids,
             req_pool_indices=self.req_pool_indices,
+            req_to_token_pool=self.req_to_token_pool,
             seq_lens=self.seq_lens,
             orig_seq_lens=self.orig_seq_lens,
             out_cache_loc=self.out_cache_loc,
@@ -1766,6 +1774,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             token_type_ids=self.token_type_ids,
             spec_algorithm=self.spec_algorithm,
             spec_info=self.spec_info,
+            eos_id=self.eos_id,
             hicache_consumer_index=self.hicache_consumer_index,
             capture_hidden_mode=(
                 CaptureHiddenMode.FULL
@@ -1854,12 +1863,14 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 class ModelWorkerBatch:
     # The batch id
     bid: int
+    eos_id: int
     # The forward mode
     forward_mode: ForwardMode
     # The input ids
     input_ids: torch.Tensor
     # The indices of requests in the req_to_token_pool
     req_pool_indices: torch.Tensor
+    req_to_token_pool: ReqToTokenPool
     # The sequence length
     seq_lens: torch.Tensor
     # The indices of output tokens in the token_to_kv_pool_allocator
