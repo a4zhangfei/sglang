@@ -959,6 +959,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     @property
     def eos_id(self) -> int:
+        # TODO: support multiple eos token ids
         if self.eos_token_id is None and len(self.reqs) > 0:
             self.eos_token_id = self.reqs[0].tokenizer.eos_token_id
         return self.eos_token_id

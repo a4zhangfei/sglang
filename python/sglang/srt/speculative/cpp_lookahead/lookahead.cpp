@@ -9,36 +9,45 @@ struct Node {
     std::unordered_map<int32_t, int32_t> next;
 };
 
-void fillResult(Lookahead::Result* info, int return_token_limit, std::vector<Node>& tree, int root) {
-    info->token.reserve(return_token_limit);
-    info->prev.reserve(return_token_limit);
+Lookahead::Result fillResult(int last_token, int draft_token_num, std::vector<Node>& tree, int root) {
+    Lookahead::Result info;
+    std::vector<int32_t> prevs;
+    info.token.reserve(draft_token_num);
+    prevs.reserve(draft_token_num);
     std::queue<std::tuple<int32_t, int32_t, int32_t>> queue;
+    info.token.emplace_back(last_token);
+    prevs.emplace_back(-1);
+
     for (auto [token, next] : tree[root].next) {
-        queue.emplace(token, next, -1);
+        queue.emplace(token, next, 0);
     }
     while (queue.size()) {
         auto [token, next, prev] = queue.front();
         queue.pop();
-        info->token.emplace_back(token);
-        info->prev.emplace_back(prev);
+        info.token.emplace_back(token);
+        prevs.emplace_back(prev);
         for (auto [t, n] : tree[next].next) {
-            queue.emplace(t, n, info->token.size() - 1);
+            queue.emplace(t, n, info.token.size() - 1);
         }
     }
 
-    int n = info->token.size();
-    info->mask.resize(n * n, 0);
+    // zero padding to length
+    while(info.token.size() < draft_token_num) {
+        info.token.emplace_back(0);
+        prevs.emplace_back(0);
+    }
+
+    int n = info.token.size();
+    info.mask.resize(n * n, 0);
+    info.mask[0] = 1;
     for (int i = 0; i < n; ++i) {
-        if (info->prev[i] != -1) {
-            memcpy(&info->mask[i * n], &info->mask[info->prev[i] * n], info->prev[i] + 1);
+        if (prevs[i] != -1) {
+            memcpy(&info.mask[i * n], &info.mask[prevs[i] * n], prevs[i] + 1);
         }
-        info->mask[i * n + i] = 1;
+        info.mask[i * n + i] = 1;
     }
-    info->position.resize(n);
-    for (int i = 0; i < n; ++i) {
-        int prev = info->prev[i];
-        info->position[i] = prev == -1 ? 0 : (info->position[prev] + 1);
-    }
+
+    return info;
 }
 
 Lookahead::Lookahead(size_t capacity, const Param& param) {
@@ -56,10 +65,10 @@ Lookahead::Lookahead(size_t capacity, const Param& param) {
     CHECK(param_.max_match_window_size < param_.branch_length) << " max_match_window_size: " << param_.max_match_window_size << " branch_length: " << param_.branch_length;
     CHECK(param_.min_bfs_breadth > 0) << " min_bfs_breadth: " << param_.min_bfs_breadth;
     CHECK(param_.min_bfs_breadth <= param_.max_bfs_breadth) << " min_bfs_breadth: " << param_.min_bfs_breadth << " max_bfs_breadth: " << param_.max_bfs_breadth;
-    CHECK(param_.return_token_limit > 0) << " return_token_limit: " << param_.return_token_limit;
+    CHECK(param_.draft_token_num > 0) << " draft_token_num: " << param_.draft_token_num;
     for (auto config : param_.batch_return_token_num) {
         if (config != std::numeric_limits<decltype(config)>::max()) {
-            CHECK(config <= param_.return_token_limit) << " batch_return_token_num: " << config << " return_token_limit: " << param_.return_token_limit;
+            CHECK(config <= param_.draft_token_num) << " batch_return_token_num: " << config << " draft_token_num: " << param_.draft_token_num;
         }
     }
     for (auto config : param_.batch_min_match_window_size) {
@@ -79,8 +88,8 @@ Lookahead::~Lookahead() {
     insert_worker_.join();
 }
 
-std::vector<std::pair<TrieNode*, int32_t>> Lookahead::match(const std::vector<int32_t>& tokens, size_t batch_size) {
-    auto return_token_limit = param_.get_return_token_num(batch_size);
+std::vector<std::pair<TrieNode*, int32_t>> Lookahead::match(const std::vector<int32_t>& tokens, size_t batch_size) const {
+    auto draft_token_num = param_.get_return_token_num(batch_size);
     auto min_match_window_size = param_.get_min_match_window_size(batch_size);
     auto max_match_window_size = param_.max_match_window_size;
     std::vector<std::pair<TrieNode*, int32_t>> result;
@@ -123,7 +132,7 @@ void Lookahead::squeeze(size_t count) {
     }
 }
 
-void Lookahead::synchronize() {
+void Lookahead::synchronize() const {
     while (!insert_queue_.empty()) {
         std::this_thread::sleep_for(std::chrono::microseconds(10));
     }
@@ -185,32 +194,27 @@ void Lookahead::insert() {
     }
 }
 
-void Lookahead::async_insert(std::vector<int32_t>&& tokens) {
-    insert_queue_.enqueue(std::move(tokens));
+void Lookahead::asyncInsert(std::vector<std::vector<int32_t>>&& tokens) {
+    for (auto&& token : tokens) {
+        insert_queue_.enqueue(std::move(token));
+    }
 }
 
-Lookahead::Result Lookahead::matchBFS(const std::vector<int32_t>& tokens, size_t batch_size) {
-    std::unique_lock<std::mutex> lock(mutex_);
-
+Lookahead::Result Lookahead::matchBFS(const std::vector<int32_t>& tokens, size_t batch_size) const {
     std::vector<std::pair<TrieNode*, int32_t>> nodes = match(tokens, batch_size);
-
-    Result info;
-    if (nodes.empty()) {
-        return info;
-    }
 
     double bfs_breadth_scale = double(param_.max_bfs_breadth - param_.min_bfs_breadth) /
                                (param_.max_match_window_size - param_.min_match_window_size + 1);
 
-    auto return_token_limit = param_.get_return_token_num(batch_size);
-    std::vector<Node> tree(return_token_limit + 1);
+    auto draft_token_num = param_.get_return_token_num(batch_size);
+    std::vector<Node> tree(draft_token_num + 1);
     int root = 0;
     int cursor = 1;
 
     for (auto [node, depth] : nodes) {
         std::queue<std::tuple<int32_t, double, const TrieNode*>> queue;  // parent, bfs_breadth, node
         queue.push({root, (param_.max_match_window_size - depth) * bfs_breadth_scale + param_.min_bfs_breadth, node});
-        while (queue.size() && cursor <= return_token_limit) {
+        while (queue.size() && cursor <= draft_token_num) {
             auto front = queue.front();
             queue.pop();
 
@@ -219,7 +223,7 @@ Lookahead::Result Lookahead::matchBFS(const std::vector<int32_t>& tokens, size_t
             auto iter = std::get<2>(front)->lru.begin();
 
             auto breadth = std::max(1, int32_t(cur_breadth));
-            for (int i = 0; i < breadth && iter != std::get<2>(front)->lru.end() && cursor <= return_token_limit;
+            for (int i = 0; i < breadth && iter != std::get<2>(front)->lru.end() && cursor <= draft_token_num;
                  ++i, ++iter) {
                 auto token = (*iter)->token;
                 auto pos = -1;
@@ -233,18 +237,12 @@ Lookahead::Result Lookahead::matchBFS(const std::vector<int32_t>& tokens, size_t
         }
     }
 
-    fillResult(&info, return_token_limit, tree, root);
-    return info;
+    return fillResult(tokens.back(), draft_token_num + 1, tree, root);
 }
 
-Lookahead::Result Lookahead::matchProb(const std::vector<int32_t>& tokens, size_t batch_size) {
-    std::unique_lock<std::mutex> lock(mutex_);
+Lookahead::Result Lookahead::matchProb(const std::vector<int32_t>& tokens, size_t batch_size) const {
     std::vector<std::pair<TrieNode*, int32_t>> nodes = match(tokens, batch_size);
-    Result info;
-    if (nodes.empty()) {
-        return info;
-    }
-    auto return_token_limit = param_.get_return_token_num(batch_size);
+    auto draft_token_num = param_.get_return_token_num(batch_size);
     struct CompareByLastDouble {
     bool operator()(
         const std::tuple< double, const TrieNode*, double>& a,// parent_pos,  node, final_prob
@@ -253,7 +251,7 @@ Lookahead::Result Lookahead::matchProb(const std::vector<int32_t>& tokens, size_
         return std::get<2>(a) < std::get<2>(b);  // 比较freq
     }
     };
-    std::vector<Node> tree(return_token_limit + 1);
+    std::vector<Node> tree(draft_token_num + 1);
  
     int root = 0;
     int cursor = 1;
@@ -278,7 +276,7 @@ Lookahead::Result Lookahead::matchProb(const std::vector<int32_t>& tokens, size_
             double norm_freq = (static_cast<double>(freq)/temperature) / sum_freq;
             heap.emplace(root, child, norm_freq);
         }
-        while (!heap.empty() && cursor <= return_token_limit)
+        while (!heap.empty() && cursor <= draft_token_num)
         {
             auto [parent, trie_node, prob] = heap.top();// parent_pos, node, final_prob
             heap.pop();
@@ -314,28 +312,35 @@ Lookahead::Result Lookahead::matchProb(const std::vector<int32_t>& tokens, size_
         }
     }
 
-    fillResult(&info, return_token_limit, tree, root);
-    return info;
+    return fillResult(tokens.back(), draft_token_num + 1, tree, root);
+}
+
+Lookahead::Result Lookahead::batchMatch(const std::vector<std::vector<int32_t>>& tokens) const {
+    std::unique_lock<std::mutex> lock(mutex_);
+    Result merged_result;
+    for (const auto& tks : tokens) {
+        Result res = matchBFS(tks, tokens.size());
+        merged_result.token.insert(merged_result.token.end(), res.token.begin(), res.token.end());
+        merged_result.mask.insert(merged_result.mask.end(), res.mask.begin(), res.mask.end());
+    }
+    return merged_result;
 }
 
 /*Lookahead::Result Lookahead::matchBFS_sort(const std::vector<int32_t>& tokens, size_t batch_size) {
     std::unique_lock<std::mutex> lock(mutex_);
     std::vector<std::pair<TrieNode*, int32_t>> nodes = match(tokens, batch_size);
-    Result info;
-    if (nodes.empty()) {
-        return info;
-    }
+
     double bfs_breadth_scale = double(param_.max_bfs_breadth - param_.min_bfs_breadth) /
                                (param_.max_match_window_size - param_.min_match_window_size + 1);
-    auto return_token_limit = param_.get_return_token_num(batch_size);//decoding length
-    std::vector<Node> tree(return_token_limit + 1);
+    auto draft_token_num = param_.get_return_token_num(batch_size);//decoding length
+    std::vector<Node> tree(draft_token_num + 1);
     
     int root = 0;
     int cursor = 1;
     for (auto [node, depth] : nodes) {
         std::queue<std::tuple<int32_t, double, const TrieNode*>> queue;  // parent, bfs_breadth, node
         queue.push({root, (param_.max_match_window_size - depth) * bfs_breadth_scale + param_.min_bfs_breadth, node});
-        while (queue.size() && cursor <= return_token_limit) {
+        while (queue.size() && cursor <= draft_token_num) {
             auto front = queue.front();
             queue.pop();
 
@@ -350,7 +355,7 @@ Lookahead::Result Lookahead::matchProb(const std::vector<int32_t>& tokens, size_
                     [](TrieNode* a, TrieNode* b) {
                         return a->freq > b->freq;
                     });
-            for (int i = 0; i < breadth && i < sorted_children.size() && cursor <= return_token_limit;
+            for (int i = 0; i < breadth && i < sorted_children.size() && cursor <= draft_token_num;
                  ++i) {
                 TrieNode* child = sorted_children[i];
                 auto token = child->token;
@@ -374,8 +379,7 @@ Lookahead::Result Lookahead::matchProb(const std::vector<int32_t>& tokens, size_
         }
     }
     
-    fillResult(&info, return_token_limit, tree, root);
-    return info;
+    return fillResult(tokens.back(), draft_token_num + 1, tree, root);
 }*/
 
 void Lookahead::fillLowerTrangularMatrix(Result& info) {
@@ -384,14 +388,6 @@ void Lookahead::fillLowerTrangularMatrix(Result& info) {
     info.mask.resize(n * n);
     for (int i = 0; i < n; ++i) {
         std::fill_n(info.mask.begin() + i * n, i + 1, uint8_t(1));
-    }
-    info.prev.resize(n);
-    for (int i = 0; i < n; ++i) {
-        info.prev[i] = i - 1;
-    }
-    info.position.resize(n);
-    for (int i = 0; i < n; ++i) {
-        info.position[i] = i;
     }
 }
 
@@ -403,8 +399,6 @@ void Lookahead::Result::truncate(size_t n) {
         }
         token.resize(n);
         mask.resize(n * n);
-        prev.resize(n);
-        position.resize(n);
     }
 }
 

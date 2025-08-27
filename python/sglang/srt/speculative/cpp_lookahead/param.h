@@ -19,7 +19,7 @@ struct Param {
     size_t              min_match_window_size;
     size_t              max_match_window_size;
     size_t              branch_length;
-    size_t              return_token_limit;
+    size_t              draft_token_num;
     size_t              capacity;
     std::vector<size_t> batch_min_match_window_size;
     std::vector<size_t> batch_return_token_num;
@@ -32,7 +32,7 @@ struct Param {
                 return batch_return_token_num[batch_size];
             }
         }
-        return return_token_limit;
+        return draft_token_num - 1;
     }
 
     size_t get_min_match_window_size(size_t batch_size) const
@@ -111,7 +111,7 @@ struct Param {
            << ", min_bfs_breadth = " << min_bfs_breadth << ", max_bfs_breadth = " << max_bfs_breadth
            << ", min_match_window_size = " << min_match_window_size
            << ", max_match_window_size = " << max_match_window_size << ", branch_length = " << branch_length
-           << ", return_token_limit = " << return_token_limit << ", capacity = " << capacity;
+           << ", draft_token_num = " << draft_token_num << ", capacity = " << capacity;
         ss << ", batch_min_match_window_size(" << batch_min_match_window_size.size() << ") = ";
         for (int i = 0; i < batch_min_match_window_size.size(); ++i) {
             ss << i << "|" << batch_min_match_window_size[i] << ",";

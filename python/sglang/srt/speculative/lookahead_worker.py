@@ -54,7 +54,7 @@ class LOOKAHEADWorker:
             max_bfs_breadth=server_args.speculative_lookahead_max_bfs_breadth,
             capacity=server_args.speculative_lookahead_capacity,
             branch_length=server_args.speculative_lookahead_branch_length, 
-            return_token_limit=server_args.speculative_num_draft_tokens,
+            draft_token_num=server_args.speculative_num_draft_tokens,
         )
 
     def reset(self):
@@ -139,22 +139,19 @@ class LOOKAHEADWorker:
         look_ahead_res = []
 
         self.lookahead_cache.synchronize()
-        total_draft_token_num = 0
+        batch_tokens = []
         for req in batch.reqs:
-            if self.lookahead_cache is not None:
-                check_token = self._efficient_concat_last_n(
-                    req.origin_input_ids, req.output_ids, self.max_match_window_size
-                )
-                req_drafts, mask = self.lookahead_cache.get(check_token)
-                total_draft_token_num += len(req_drafts)
-                look_ahead_res.append((req_drafts, mask))
+            check_token = self._efficient_concat_last_n(
+                req.origin_input_ids, req.output_ids, self.max_match_window_size
+            )
+            batch_tokens.append(check_token)
+        req_drafts, mask = self.lookahead_cache.batch_get(batch_tokens)
+        total_draft_token_num = len(req_drafts)
+        look_ahead_res.append((req_drafts, mask))
 
-        # 检查是否需要 speculative decoding，这里强制满足
+        # Check if speculative decoding is needed; here we always enforce it
         assert total_draft_token_num == bs * self.num_branch_token, f"{total_draft_token_num=}, {bs=}, {self.num_branch_token=}"
-
-        cpu_tree_mask_combined = np.concatenate([mask.flatten() for _, mask in look_ahead_res])
-        cpu_draft_tokens_combined = np.concatenate([drafts for drafts, _ in look_ahead_res])
-        return cpu_tree_mask_combined, cpu_draft_tokens_combined
+        return req_drafts, mask
 
     def prepare_for_verify(self, batch: ScheduleBatch):
         if batch.forward_mode.is_extend():
@@ -169,13 +166,13 @@ class LOOKAHEADWorker:
         tree_mask = self.tree_mask_batch[bs]
         draft_tokens = self.draft_tokens_batch[bs]
 
-        cpu_tree_mask_combined, cpu_draft_tokens_combined = self.prepare_draft_tokens(batch)
-        tree_mask.copy_(torch.from_numpy(cpu_tree_mask_combined), non_blocking=True)
-        draft_tokens.copy_(torch.from_numpy(cpu_draft_tokens_combined), non_blocking=True)
+        req_drafts, mask = self.prepare_draft_tokens(batch)
+        tree_mask.copy_(torch.from_numpy(mask), non_blocking=True)
+        draft_tokens.copy_(torch.from_numpy(req_drafts), non_blocking=True)
 
         reconstruct_indices_from_tree_mask(
             tree_mask,
-            # seq_lens 是 int64
+            # seq_lens is int64
             batch.seq_lens.to(dtype=torch.int32),
             positions,            # mutable
             retrive_index,        # mutable
@@ -208,6 +205,7 @@ class LOOKAHEADWorker:
         if self.lookahead_cache is None:
             return
 
+        batch_tokens = []
         for req in batch.reqs:
             # FIXME: extend 到底要不要插入到 cache 里，测试了下区别不大，先不插入了
             # if batch.forward_mode.is_extend():
@@ -216,7 +214,8 @@ class LOOKAHEADWorker:
             put_ids = self._efficient_concat_last_n(
                 req.origin_input_ids, req.output_ids, self.branch_length
             )
-            self.lookahead_cache.put(put_ids)
+            batch_tokens.append(put_ids)
+        self.lookahead_cache.batch_put(batch_tokens)
 
     def forward_batch_speculative_generation(self, batch: ScheduleBatch):
         self.prepare_for_verify(batch)

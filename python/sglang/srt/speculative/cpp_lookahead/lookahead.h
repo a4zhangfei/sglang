@@ -47,7 +47,7 @@ class Lookahead {
     std::vector<TrieNode*> path_;
     Param param_;
 
-    std::vector<std::pair<TrieNode*, int32_t>> match(const std::vector<int32_t>& tokens, size_t batch_size);
+    std::vector<std::pair<TrieNode*, int32_t>> match(const std::vector<int32_t>& tokens, size_t batch_size) const;
 
     void squeeze(size_t count);
 
@@ -74,22 +74,18 @@ class Lookahead {
         return instance;
     }
 
-    void synchronize();
+    void synchronize() const;
 
-    void async_insert(std::vector<int32_t>&& tokens);
+    void asyncInsert(std::vector<std::vector<int32_t>>&& tokens);
 
     struct Result {
         std::vector<int32_t> token;
         std::vector<uint8_t> mask;
-        std::vector<int8_t> prev;
-        std::vector<uint8_t> position;
 
         void truncate(size_t n);
     };
 
-    Result matchBFS(const std::vector<int32_t>& tokens, size_t batch_size);
-    Result matchProb(const std::vector<int32_t>& tokens, size_t batch_size);
-    // Result matchBFS_sort(const std::vector<int32_t>& tokens, size_t batch_size);
+    Result batchMatch(const std::vector<std::vector<int32_t>>& tokens) const;
 
     void reset() {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -107,6 +103,9 @@ class Lookahead {
     const Param& param() const { return param_; }
 
   private:
+    Result matchBFS(const std::vector<int32_t>& tokens, size_t batch_size) const;
+    Result matchProb(const std::vector<int32_t>& tokens, size_t batch_size) const;
+
     void fillLowerTrangularMatrix(Result& info);
     void insert();
 };

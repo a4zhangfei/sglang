@@ -14,9 +14,8 @@ PYBIND11_MODULE(lookahead_cache_cpp, m) {
             py::init<size_t, const Param&>(),
             py::arg("capacity"),
             py::arg("param"))
-        .def("async_insert", &Lookahead::async_insert, "")
-        .def("matchBFS", &Lookahead::matchBFS, "")
-        .def("matchProb", &Lookahead::matchProb, "")
+        .def("asyncInsert", &Lookahead::asyncInsert, "")
+        .def("batchMatch", &Lookahead::batchMatch, "")
         .def("reset", &Lookahead::reset, "")
         .def("synchronize", &Lookahead::synchronize, "");
 
@@ -29,7 +28,7 @@ PYBIND11_MODULE(lookahead_cache_cpp, m) {
         .def_readwrite("min_match_window_size", &Param::min_match_window_size)
         .def_readwrite("max_match_window_size", &Param::max_match_window_size)
         .def_readwrite("branch_length", &Param::branch_length)
-        .def_readwrite("return_token_limit", &Param::return_token_limit)
+        .def_readwrite("draft_token_num", &Param::draft_token_num)
         .def_readwrite("capacity", &Param::capacity)
         .def_readwrite("batch_min_match_window_size", &Param::batch_min_match_window_size)
         .def_readwrite("batch_return_token_num", &Param::batch_return_token_num)
@@ -44,7 +43,5 @@ PYBIND11_MODULE(lookahead_cache_cpp, m) {
         .def(py::init<>())
         .def_readwrite("token", &Lookahead::Result::token)
         .def_readwrite("mask", &Lookahead::Result::mask)
-        .def_readwrite("prev", &Lookahead::Result::prev)
-        .def_readwrite("position", &Lookahead::Result::position)
         .def("truncate", &Lookahead::Result::truncate);
 }
